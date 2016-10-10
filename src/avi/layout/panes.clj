@@ -29,6 +29,7 @@
 
 (defn- annotate-shape
   [parent]
+  {:pre [(:avi.layout/shape parent)]}
   (case (::direction parent)
     :horizontal
     (xf/annotate (fn [[[i j] [rows cols]] input]
@@ -100,6 +101,20 @@
 
 (def all-panes (comp all-nodes (filter ::lens)))
 
+(def all-renderables
+  (comp all-panes
+        (fn [rf]
+          (fn
+            ([] (rf))
+            ([result] (rf result))
+            ([result input]
+             (let [[[i j] [rows cols]] (:avi.layout/shape input)
+                   result (rf result input)]
+               (cond-> result
+                 (not (zero? j))
+                 (rf {:avi.layout/shape [[i (dec j)] [rows 1]]
+                      :avi.layout/renderable-type ::vertical-bar}))))))))
+
 (defn- augmented-root-pane
   [{:keys [::tree] :as editor}]
   (+> tree
@@ -131,22 +146,24 @@
 
 (defn pane-tree-cata
   [editor xform]
+  {:pre [(::lens (current-pane editor))]}
   (let [tree (augmented-root-pane editor)
         tree (first (xf/cata
                       xfmap
                       (comp
                         (map #(cond-> %
                                 (= (::path editor) (::path %))
-                                (assoc ::focused true)))
+                                (assoc ::focused? true)))
                         xform)
                       tree))
+        tree (assoc tree ;; hack! see augmented-root-pane
+                    :avi.layout/shape (root-pane-shape editor)
+                    ::path [])
         path (::path (first (sequence
-                              (comp all-nodes (filter ::focused))
-                              [(assoc tree ;; hack! see augmented-root-pane
-                                      :avi.layout/shape (root-pane-shape editor)
-                                      ::path [])])))
+                              (comp all-nodes (filter ::focused?))
+                              [tree])))
         _ (assert path)
-        tree (first (xf/cata xfmap (map #(dissoc % ::focused)) tree))]
+        tree (first (xf/cata xfmap (map #(dissoc % ::focused?)) tree))]
     (assoc editor
            ::path path
            ::tree tree)))
@@ -182,16 +199,16 @@
 (defn- flatten-like-splits
   [tree]
   (+> tree
-   (if-let [subtrees (::subtrees tree)]
+   (if (::subtrees tree)
      (update ::subtrees
-             #(vec
-                (mapcat (fn [child]
-                          (if (or (::lens child)
-                                  (not= (::direction tree) (::direction child))
-                                  )
-                            [child]
-                            (::subtrees child)))
-                        %))))))
+             (fn [subtrees]
+               (into []
+                     (mapcat (fn [child]
+                               (if (or (::lens child)
+                                       (not= (::direction tree) (::direction child)))
+                                 [child]
+                                 (::subtrees child))))
+                     subtrees))))))
 
 (defn- remove-one-child-splits
   [tree]
@@ -201,15 +218,15 @@
 
 (defn- simplify-panes
   [editor]
-  (pane-tree-cata editor (comp (map flatten-like-splits)
-                               (map remove-one-child-splits))))
+  (pane-tree-cata editor (comp (map remove-one-child-splits)
+                               (map flatten-like-splits))))
 
 (defn- split-pane'
   [editor new-lens direction]
   (+> editor
     (pane-tree-cata
       (map (fn [node]
-             (if (::focused node)
+             (if (::focused? node)
                (let [[_ [rows cols]] (:avi.layout/shape node)
                      old-extent (case direction
                                   :horizontal rows
@@ -224,7 +241,7 @@
                                        ::lens new-lens))
                               (-> node
                                 (update ::path conj 1)
-                                (dissoc ::focused)
+                                (dissoc ::focused?)
                                 (dissoc ::extent))]})
                node))))))
 
@@ -235,15 +252,47 @@
   :ret ::split)
 (defn split-pane
   [editor new-lens direction]
+  {:post [(::lens (current-pane %))]}
   (let [{:keys [::lens] [[_] [rows cols]] :avi.layout/shape :as pane}
           (current-pane editor)]
     (if (or (and (= direction :horizontal) (> (/ rows 2) 2))
            (and (= direction :vertical)  (> (/ cols 2) 2)))
       (+> editor
         (split-pane' new-lens direction)
-          simplify-panes
-          resize-panes)
+        simplify-panes
+        resize-panes)
       (b/beep editor "No room for new Pane"))))
+
+(defn- focused-path-after-close
+  [{:keys [::path] :as editor}]
+  (let [prefix (conj (pop path) (if (zero? (peek path))
+                                  1
+                                  (dec (peek path))))]
+    (first (sequence
+             (comp
+               all-panes
+               (map ::path)
+               (filter (fn [p]
+                         (and (<= (count prefix) (count p))
+                              (= prefix (subvec p 0 (count prefix)))))))
+             [(augmented-root-pane editor)]))))
+
+(defn close-pane
+  [{:keys [::tree ::path] :as editor}]
+  {:pre [(::lens (current-pane editor))]
+   :post [(or (:finished? %) (::lens (current-pane %)))]}
+  (+> editor
+    (if (::lens tree)
+      (assoc :finished? true)
+      (let [new-path (focused-path-after-close editor)]
+        (pane-tree-cata
+          (comp (remove #(= (::path %) path))
+                (map (fn [pane]
+                       (cond-> pane
+                         (= (::path pane) new-path)
+                         (assoc ::focused? true))))))
+        simplify-panes
+        resize-panes))))
 
 (defn- reachable
   [[i j] [di dj]]
