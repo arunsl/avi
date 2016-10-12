@@ -19,25 +19,28 @@
                      :motion [:goto [(dec (Long/parseLong command-line)) :first-non-blank]]}))))
 
 (defn q
-  [editor]
+  [editor force?]
   (p/close-pane editor))
 
 (defn w
-  [editor]
+  [editor force?]
   (let [{filename :name, :keys [lines]} (get-in editor (e/current-document-path editor))]
     (w/write-file w/*world* filename (string/join "\n" lines))
     editor))
 
-(def wq (comp q w))
+(defn wq
+  [editor force?]
+  (w editor force?)
+  (q editor force?))
 
 (defn sp
-  [{:keys [:lenses] :as editor}]
+  [{:keys [:lenses] :as editor} force?]
   (-> editor
     (update :lenses conj (e/current-lens editor))
     (p/split-pane (count lenses) :horizontal)))
 
 (defn vsp
-  [{:keys [:lenses] :as editor}]
+  [{:keys [:lenses] :as editor} force?]
   (-> editor
     (update :lenses conj (e/current-lens editor))
     (p/split-pane (count lenses) :vertical)))
